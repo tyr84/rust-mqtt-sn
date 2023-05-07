@@ -236,6 +236,7 @@ pub enum Message {
     GwInfo(GwInfo),
     Connect(Connect),
     ConnAck(ConnAck),
+    Disconnect(Disconnect),
     Register(Register),
     RegAck(RegAck),
     Publish(Publish),
@@ -269,6 +270,12 @@ impl From<Connect> for Message {
 impl From<ConnAck> for Message {
     fn from(msg: ConnAck) -> Self {
         Message::ConnAck(msg)
+    }
+}
+
+impl From<Disconnect> for Message {
+    fn from(msg: Disconnect) -> Self {
+        Message::Disconnect(msg)
     }
 }
 
@@ -340,6 +347,7 @@ impl TryWrite for Message {
             Message::GwInfo(msg) => bytes.write(offset, msg),
             Message::Connect(msg) => bytes.write(offset, msg),
             Message::ConnAck(msg) => bytes.write(offset, msg),
+            Message::Disconnect(msg) => bytes.write(offset, msg),
             Message::Register(msg) => bytes.write(offset, msg),
             Message::RegAck(msg) => bytes.write(offset, msg),
             Message::Publish(msg) => bytes.write(offset, msg),
@@ -375,6 +383,7 @@ impl TryRead<'_> for Message {
                 UnsubAck::MSG_TYPE => Message::UnsubAck(bytes.read(offset)?),
                 0x16 => Message::PingReq(bytes.read(offset)?),
                 0x17 => Message::PingResp(bytes.read(offset)?),
+                0x18 => Message::Disconnect(bytes.read(offset)?),
                 _t => {
                     return Err(byte::Error::BadInput {
                         err: "Recieved a message with unknown type",
@@ -488,6 +497,51 @@ impl TryRead<'_> for Connect {
                 flags,
                 duration: bytes.read_with(offset, byte::ctx::BE)?,
                 client_id: bytes.read_with(offset, len as usize - 6)?,
+            },
+            *offset,
+        ))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Disconnect {
+    pub duration: Option<u16>,
+}
+
+impl TryWrite for Disconnect {
+    fn try_write(self, bytes: &mut [u8], _ctx: ()) -> byte::Result<usize> {
+        let offset = &mut 0;
+        let len = match self.duration {
+            Some(_) => 4u8,
+            None => 2u8
+        };
+        bytes.write(offset, len)?;
+        bytes.write(offset, 0x18u8)?; // msg type
+        if let Some(duration) = self.duration {
+            bytes.write_with(offset, duration, byte::ctx::BE)?;
+        }
+        Ok(*offset)
+    }
+}
+
+impl TryRead<'_> for Disconnect {
+    fn try_read(bytes: &[u8], _ctx: ()) -> byte::Result<(Self, usize)> {
+        let offset = &mut 0;
+        let len: u8 = bytes.read(offset)?;
+        check_len(bytes, len as usize)?;
+        if (len != 2) & (len != 4) {
+            return Err(byte::Error::BadInput {
+                err: "Disonnect len must be either 2 or 4 bytes",
+            });
+        }
+        *offset += 1; // msg type
+        Ok((
+            Disconnect {
+                duration: match len {
+                    4 => Some(bytes.read_with(offset, byte::ctx::BE)?),
+                    _ => None
+                },
             },
             *offset,
         ))
@@ -1205,6 +1259,38 @@ mod tests {
                 0x11u8, 0x04, 0x12, 0x01, 0x34, 0x56, b't', b'e', b's', b't', b'-', b'c', b'l',
                 b'i', b'e', b'n', b't'
             ]
+        );
+        let actual: Message = bytes.read(&mut 0).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn disconnect_encode_parse() {
+        let mut bytes = [0u8; 20];
+        let mut len = 0usize;
+        let expected = Message::Disconnect(Disconnect {
+            duration: None,
+        });
+        bytes.write(&mut len, expected.clone()).unwrap();
+        assert_eq_hex!(
+            &bytes[..len],
+            [0x2u8, 0x18]
+        );
+        let actual: Message = bytes.read(&mut 0).unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn disconnect_encode_parse_duration() {
+        let mut bytes = [0u8; 20];
+        let mut len = 0usize;
+        let expected = Message::Disconnect(Disconnect {
+            duration: Some(0x3456),
+        });
+        bytes.write(&mut len, expected.clone()).unwrap();
+        assert_eq_hex!(
+            &bytes[..len],
+            [0x4u8, 0x18, 0x34, 0x56]
         );
         let actual: Message = bytes.read(&mut 0).unwrap();
         assert_eq!(actual, expected);
